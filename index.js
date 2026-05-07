@@ -15,7 +15,6 @@ const client = new Client({
         GatewayIntentBits.Guilds,
         GatewayIntentBits.GuildVoiceStates,
         GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.DirectMessages,
         GatewayIntentBits.MessageContent
     ]
 });
@@ -23,36 +22,17 @@ const client = new Client({
 app.use(express.json());
 
 let playerPositions = {}; 
-let voiceCodes = {}; 
+let tempLinkCodes = {}; // { code: robloxUserId }
 let activeProximityChannels = {};
 
 // --- [ API Routes ] ---
 
-app.post('/verify_code', async (req, res) => {
+// توليد كود الربط من روبلوكس
+app.post('/generate_link', (req, res) => {
     const { userId, code } = req.body;
-    console.log(`[Roblox] Verify attempt: UserId ${userId}, Code ${code}`);
-    
-    const discordId = voiceCodes[code];
-    if (discordId) {
-        playerPositions[userId] = {
-            discordId: discordId,
-            userId: userId,
-            pos: { x: 0, y: 0, z: 0 }
-        };
-
-        const guild = client.guilds.cache.get(CONFIG.GUILD_ID);
-        const member = await guild.members.fetch(discordId).catch(() => null);
-        if (member) {
-            member.send("✅ **تم ربط حسابك بنجاح!**").catch(() => {});
-        }
-
-        delete voiceCodes[code];
-        console.log(`[Success] Linked ${userId} to ${discordId}`);
-        res.send({ success: true });
-    } else {
-        console.log(`[Fail] Code ${code} is invalid.`);
-        res.send({ success: false, message: "Invalid Code" });
-    }
+    tempLinkCodes[code] = userId;
+    console.log(`[Roblox] New Link Code: ${code} for User: ${userId}`);
+    res.send({ success: true });
 });
 
 app.post('/toggle_mic', async (req, res) => {
@@ -80,33 +60,33 @@ app.post('/update', (req, res) => {
     res.send("OK");
 });
 
-// --- [ Discord Logic ] ---
-
-client.on('voiceStateUpdate', async (oldState, newState) => {
-    if (newState.channelId === CONFIG.LOBBY_CHANNEL_ID && oldState.channelId !== CONFIG.LOBBY_CHANNEL_ID) {
-        const member = newState.member;
-        const code = Math.floor(100 + Math.random() * 900).toString();
-        voiceCodes[code] = member.id;
-        try {
-            await member.send(`👋 رمز الربط الخاص بك هو: **${code}**`);
-        } catch (e) {
-            console.log("Could not send DM to user.");
-        }
-    }
+// تحقق هل اللاعب مرتبط أم لا
+app.get('/is_linked/:userId', (req, res) => {
+    const isLinked = !!playerPositions[req.params.userId];
+    res.send({ linked: isLinked });
 });
+
+// --- [ Discord Logic ] ---
 
 client.on('messageCreate', async (message) => {
     if (message.author.bot) return;
-    if (message.content === '!code') {
-        const member = await message.guild.members.fetch(message.author.id).catch(() => null);
-        if (member && member.voice.channelId === CONFIG.LOBBY_CHANNEL_ID) {
-            const code = Math.floor(100 + Math.random() * 900).toString();
-            voiceCodes[code] = message.author.id;
-            await message.author.send(`رمز الرب0 الخاص بك هو: **${code}**`).catch(() => {
-                message.reply("❌ الخاص مغلق!");
-            });
+
+    if (message.content.startsWith('!link')) {
+        const code = message.content.split(' ')[1];
+        if (!code) return message.reply("⚠️ اكتب الكود هكذا: `!link 123456` ");
+
+        const robloxUserId = tempLinkCodes[code];
+        if (robloxUserId) {
+            playerPositions[robloxUserId] = {
+                discordId: message.author.id,
+                userId: robloxUserId,
+                pos: { x: 0, y: 0, z: 0 }
+            };
+            delete tempLinkCodes[code];
+            message.reply(`✅ **تم الربط بنجاح!** حساب روبلوكس المرتبط: ${robloxUserId}`);
+            console.log(`[Success] Linked Discord ${message.author.id} to Roblox ${robloxUserId}`);
         } else {
-            message.reply("❌ ادخل الروم العام أولاً.");
+            message.reply("❌ الكود خاطئ أو انتهت صلاحيته.");
         }
     }
 });
