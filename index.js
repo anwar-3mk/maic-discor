@@ -29,13 +29,14 @@ let pendingLinks = {}; // { robloxUserId: discordId }
 app.post('/request_link', async (req, res) => {
     const { userId, discordTag } = req.body;
     const guild = client.guilds.cache.get(CONFIG.GUILD_ID);
-    if (!guild) return res.status(500).send("Guild not found");
+    if (!guild) return res.status(500).send({ success: false, message: "السيرفر غير موجود" });
 
-    // البحث عن العضو في السيرفر
-    const member = guild.members.cache.find(m => m.user.tag === discordTag || m.user.username === discordTag);
-    
-    if (member) {
-        try {
+    try {
+        // البحث عن العضو في السيرفر بدقة (حتى لو لم يكن مسجلاً في الكاش)
+        const members = await guild.members.fetch({ query: discordTag, limit: 1 });
+        const member = members.first();
+        
+        if (member) {
             const row = new ActionRowBuilder().addComponents(
                 new ButtonBuilder()
                     .setCustomId(`link_${userId}`)
@@ -46,14 +47,16 @@ app.post('/request_link', async (req, res) => {
             await member.send({
                 content: `👋 أهلاً بك! لاعب برقم **${userId}** يحاول ربط حسابه بك في روبلوكس. هل أنت هذا الشخص؟`,
                 components: [row]
+            }).catch(() => {
+                throw new Error("الخاص عندك مغلق");
             });
             
-            res.send({ success: true, message: "تم إرسال رسالة تأكيد في الخاص." });
-        } catch (err) {
-            res.send({ success: false, message: "لا يمكن إرسال رسالة خاصة لك، تأكد من فتح الخاص." });
+            res.send({ success: true, message: "تم إرسال رسالة في الخاص." });
+        } else {
+            res.send({ success: false, message: "لم يتم العثور على الاسم بالسيرفر" });
         }
-    } else {
-        res.send({ success: false, message: "لم يتم العثور على هذا المستخدم في السيرفر." });
+    } catch (err) {
+        res.send({ success: false, message: err.message || "خطأ غير متوقع" });
     }
 });
 
