@@ -46,6 +46,8 @@ client.on('voiceStateUpdate', async (oldState, newState) => {
 // التحقق من الرمز من روبلوكس
 app.post('/verify_code', (req, res) => {
     const { userId, code } = req.body;
+    console.log(`[روبلوكس] محاولة تحقق للـ UserId: ${userId} بالكود: ${code}`);
+    
     const discordId = voiceCodes[code];
 
     if (discordId) {
@@ -54,9 +56,11 @@ app.post('/verify_code', (req, res) => {
             userId: userId,
             pos: { x: 0, y: 0, z: 0 }
         };
-        delete voiceCodes[code]; // مسح الرمز بعد الاستخدام
+        console.log(`[نجاح] تم ربط ${userId} بحساب ديسكورد ${discordId}`);
+        delete voiceCodes[code];
         res.send({ success: true });
     } else {
+        console.log(`[فشل] الكود ${code} غير صحيح أو انتهت صلاحيته.`);
         res.send({ success: false, message: "الرمز خاطئ أو غير موجود" });
     }
 });
@@ -163,6 +167,24 @@ setInterval(async () => {
         }
     }
 }, 5000);
+
+// أوامر الديسكورد
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+
+    if (message.content === '!code') {
+        const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+        if (member && member.voice.channelId === CONFIG.LOBBY_CHANNEL_ID) {
+            const code = Math.floor(100 + Math.random() * 900).toString();
+            voiceCodes[code] = message.author.id;
+            await message.author.send(`رمز الربط الجديد الخاص بك هو: **${code}**`).catch(() => {
+                message.reply("❌ لا يمكنني مراسلتك، تأكد من فتح الخاص.");
+            });
+        } else {
+            message.reply("❌ يجب أن تكون متواجداً في الروم الصوتي العام لتطلب كود.");
+        }
+    }
+});
 
 const PORT = process.env.PORT || 3000;
 client.login(CONFIG.TOKEN);
