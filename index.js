@@ -12,60 +12,48 @@ const CONFIG = {
 
 const client = new Client({
     intents: [
-        GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.DirectMessages,
+        GatewayIntentBits.MessageContent
     ]
 });
 
 app.use(express.json());
 
 let playerPositions = {}; 
-let voiceCodes = {}; // { code: discordId }
+let voiceCodes = {}; 
 let activeProximityChannels = {};
 
-// --- [ منطق الربط الجديد ] ---
+// --- [ API Routes ] ---
 
-// عندما يدخل شخص للروم الصوتي العام
-client.on('voiceStateUpdate', async (oldState, newState) => {
-    // التحقق من دخول الشخص للروم العام
-    if (newState.channelId === CONFIG.LOBBY_CHANNEL_ID && oldState.channelId !== CONFIG.LOBBY_CHANNEL_ID) {
-        const member = newState.member;
-        const code = Math.floor(100 + Math.random() * 900).toString(); // رمز من 3 أرقام
-        
-        voiceCodes[code] = member.id;
-        
-        try {
-            await member.send(`👋 أهلاً بك في نظام المايك! رمز الربط الخاص بك هو: **${code}**\nاكتبه الآن داخل روبلوكس لتفعيل المايك المحيطي.`);
-            console.log(`Sent code ${code} to ${member.user.tag}`);
-        } catch (e) {
-            console.log(`Failed to send DM to ${member.user.tag}`);
-        }
-    }
-});
-
-// التحقق من الرمز من روبلوكس
-app.post('/verify_code', (req, res) => {
+app.post('/verify_code', async (req, res) => {
     const { userId, code } = req.body;
-    console.log(`[روبلوكس] محاولة تحقق للـ UserId: ${userId} بالكود: ${code}`);
+    console.log(`[Roblox] Verify attempt: UserId ${userId}, Code ${code}`);
     
     const discordId = voiceCodes[code];
-
     if (discordId) {
         playerPositions[userId] = {
             discordId: discordId,
             userId: userId,
             pos: { x: 0, y: 0, z: 0 }
         };
-        console.log(`[نجاح] تم ربط ${userId} بحساب ديسكورد ${discordId}`);
+
+        const guild = client.guilds.cache.get(CONFIG.GUILD_ID);
+        const member = await guild.members.fetch(discordId).catch(() => null);
+        if (member) {
+            member.send("✅ **تم ربط حسابك بنجاح!**").catch(() => {});
+        }
+
         delete voiceCodes[code];
+        console.log(`[Success] Linked ${userId} to ${discordId}`);
         res.send({ success: true });
     } else {
-        console.log(`[فشل] الكود ${code} غير صحيح أو انتهت صلاحيته.`);
-        res.send({ success: false, message: "الرمز خاطئ أو غير موجود" });
+        console.log(`[Fail] Code ${code} is invalid.`);
+        res.send({ success: false, message: "Invalid Code" });
     }
 });
-
-// --- [ منطق المزامنة والتحريك ] ---
 
 app.post('/toggle_mic', async (req, res) => {
     const { userId, muted } = req.body;
@@ -83,18 +71,50 @@ app.post('/toggle_mic', async (req, res) => {
 
 app.post('/update', (req, res) => {
     const { players } = req.body;
-    players.forEach(p => {
-        if (playerPositions[p.userId]) playerPositions[p.userId].pos = p.pos;
-    });
-    handleProximityMoves();
+    if (players) {
+        players.forEach(p => {
+            if (playerPositions[p.userId]) playerPositions[p.userId].pos = p.pos;
+        });
+        handleProximityMoves();
+    }
     res.send("OK");
+});
+
+// --- [ Discord Logic ] ---
+
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    if (newState.channelId === CONFIG.LOBBY_CHANNEL_ID && oldState.channelId !== CONFIG.LOBBY_CHANNEL_ID) {
+        const member = newState.member;
+        const code = Math.floor(100 + Math.random() * 900).toString();
+        voiceCodes[code] = member.id;
+        try {
+            await member.send(`👋 رمز الربط الخاص بك هو: **${code}**`);
+        } catch (e) {
+            console.log("Could not send DM to user.");
+        }
+    }
+});
+
+client.on('messageCreate', async (message) => {
+    if (message.author.bot) return;
+    if (message.content === '!code') {
+        const member = await message.guild.members.fetch(message.author.id).catch(() => null);
+        if (member && member.voice.channelId === CONFIG.LOBBY_CHANNEL_ID) {
+            const code = Math.floor(100 + Math.random() * 900).toString();
+            voiceCodes[code] = message.author.id;
+            await message.author.send(`رمز الرب0 الخاص بك هو: **${code}**`).catch(() => {
+                message.reply("❌ الخاص مغلق!");
+            });
+        } else {
+            message.reply("❌ ادخل الروم العام أولاً.");
+        }
+    }
 });
 
 async function handleProximityMoves() {
     const guild = client.guilds.cache.get(CONFIG.GUILD_ID);
     if (!guild) return;
 
-    // فقط اللاعبين الذين أكملوا عملية الربط
     let playersList = Object.values(playerPositions).filter(p => p.discordId);
     let handled = new Set();
 
@@ -155,7 +175,6 @@ async function moveToLobby(guild, player) {
     }
 }
 
-// تنظيف القنوات الفارغة
 setInterval(async () => {
     const guild = client.guilds.cache.get(CONFIG.GUILD_ID);
     if (!guild) return;
@@ -168,24 +187,6 @@ setInterval(async () => {
     }
 }, 5000);
 
-// أوامر الديسكورد
-client.on('messageCreate', async (message) => {
-    if (message.author.bot) return;
-
-    if (message.content === '!code') {
-        const member = await message.guild.members.fetch(message.author.id).catch(() => null);
-        if (member && member.voice.channelId === CONFIG.LOBBY_CHANNEL_ID) {
-            const code = Math.floor(100 + Math.random() * 900).toString();
-            voiceCodes[code] = message.author.id;
-            await message.author.send(`رمز الربط الجديد الخاص بك هو: **${code}**`).catch(() => {
-                message.reply("❌ لا يمكنني مراسلتك، تأكد من فتح الخاص.");
-            });
-        } else {
-            message.reply("❌ يجب أن تكون متواجداً في الروم الصوتي العام لتطلب كود.");
-        }
-    }
-});
-
 const PORT = process.env.PORT || 3000;
 client.login(CONFIG.TOKEN);
-app.listen(PORT, () => console.log(`Discord API running on ${PORT}`));
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
