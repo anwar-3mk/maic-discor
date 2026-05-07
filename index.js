@@ -1,4 +1,4 @@
-const { Client, GatewayIntentBits, ChannelType, PermissionsBitField, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, ChannelType, PermissionsBitField } = require('discord.js');
 const express = require('express');
 const app = express();
 
@@ -13,69 +13,55 @@ const CONFIG = {
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds, GatewayIntentBits.GuildVoiceStates,
-        GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent,
-        GatewayIntentBits.DirectMessages
+        GatewayIntentBits.GuildMessages, GatewayIntentBits.DirectMessages
     ]
 });
 
 app.use(express.json());
 
 let playerPositions = {}; 
-let pendingLinks = {}; // { robloxUserId: discordId }
+let voiceCodes = {}; // { code: discordId }
+let activeProximityChannels = {};
 
-// --- [ مسارات الـ API ] ---
+// --- [ منطق الربط الجديد ] ---
 
-// طلب ربط عبر اسم المستخدم
-app.post('/request_link', async (req, res) => {
-    const { userId, discordTag } = req.body;
-    const guild = client.guilds.cache.get(CONFIG.GUILD_ID);
-    if (!guild) return res.status(500).send({ success: false, message: "السيرفر غير موجود" });
-
-    try {
-        // البحث عن العضو في السيرفر بدقة (حتى لو لم يكن مسجلاً في الكاش)
-        const members = await guild.members.fetch({ query: discordTag, limit: 1 });
-        const member = members.first();
+// عندما يدخل شخص للروم الصوتي العام
+client.on('voiceStateUpdate', async (oldState, newState) => {
+    // التحقق من دخول الشخص للروم العام
+    if (newState.channelId === CONFIG.LOBBY_CHANNEL_ID && oldState.channelId !== CONFIG.LOBBY_CHANNEL_ID) {
+        const member = newState.member;
+        const code = Math.floor(100 + Math.random() * 900).toString(); // رمز من 3 أرقام
         
-        if (member) {
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId(`link_${userId}`)
-                    .setLabel('تأكيد ربط حساب روبلوكس ✅')
-                    .setStyle(ButtonStyle.Success)
-            );
-
-            await member.send({
-                content: `👋 أهلاً بك! لاعب برقم **${userId}** يحاول ربط حسابه بك في روبلوكس. هل أنت هذا الشخص؟`,
-                components: [row]
-            }).catch(() => {
-                throw new Error("الخاص عندك مغلق");
-            });
-            
-            res.send({ success: true, message: "تم إرسال رسالة في الخاص." });
-        } else {
-            res.send({ success: false, message: "لم يتم العثور على الاسم بالسيرفر" });
+        voiceCodes[code] = member.id;
+        
+        try {
+            await member.send(`👋 أهلاً بك في نظام المايك! رمز الربط الخاص بك هو: **${code}**\nاكتبه الآن داخل روبلوكس لتفعيل المايك المحيطي.`);
+            console.log(`Sent code ${code} to ${member.user.tag}`);
+        } catch (e) {
+            console.log(`Failed to send DM to ${member.user.tag}`);
         }
-    } catch (err) {
-        res.send({ success: false, message: err.message || "خطأ غير متوقع" });
     }
 });
 
-// التعامل مع ضغط أزرار التأكيد
-client.on('interactionCreate', async interaction => {
-    if (!interaction.isButton()) return;
+// التحقق من الرمز من روبلوكس
+app.post('/verify_code', (req, res) => {
+    const { userId, code } = req.body;
+    const discordId = voiceCodes[code];
 
-    if (interaction.customId.startsWith('link_')) {
-        const userId = interaction.customId.split('_')[1];
-        
+    if (discordId) {
         playerPositions[userId] = {
-            discordId: interaction.user.id,
+            discordId: discordId,
             userId: userId,
             pos: { x: 0, y: 0, z: 0 }
         };
-
-        await interaction.update({ content: '✅ تم ربط حسابك بنجاح! يمكنك العودة للعبة الآن.', components: [] });
+        delete voiceCodes[code]; // مسح الرمز بعد الاستخدام
+        res.send({ success: true });
+    } else {
+        res.send({ success: false, message: "الرمز خاطئ أو غير موجود" });
     }
 });
+
+// --- [ منطق المزامنة والتحريك ] ---
 
 app.post('/toggle_mic', async (req, res) => {
     const { userId, muted } = req.body;
@@ -91,7 +77,7 @@ app.post('/toggle_mic', async (req, res) => {
     res.status(400).send({ success: false });
 });
 
-app.post('/update', async (req, res) => {
+app.post('/update', (req, res) => {
     const { players } = req.body;
     players.forEach(p => {
         if (playerPositions[p.userId]) playerPositions[p.userId].pos = p.pos;
@@ -100,55 +86,55 @@ app.post('/update', async (req, res) => {
     res.send("OK");
 });
 
-// --- [ منطق التحريك (كما هو سابقاً) ] ---
 async function handleProximityMoves() {
     const guild = client.guilds.cache.get(CONFIG.GUILD_ID);
     if (!guild) return;
 
+    // فقط اللاعبين الذين أكملوا عملية الربط
     let playersList = Object.values(playerPositions).filter(p => p.discordId);
     let handled = new Set();
-    let activeProximityChannels = {}; 
 
-    // (نفس الكود السابق للتحريك والميوت التلقائي)
-    // ملاحظة: قمت بتبسيطه هنا للاختصار ولكن سأحافظ على وظيفته
     for (let i = 0; i < playersList.length; i++) {
         let p1 = playersList[i];
         if (handled.has(p1.userId)) continue;
+
         let cluster = [p1];
         for (let j = i + 1; j < playersList.length; j++) {
             let p2 = playersList[j];
-            if (dist(p1.pos, p2.pos) < CONFIG.PROXIMITY_DISTANCE) cluster.push(p2);
+            const d = Math.sqrt(Math.pow(p1.pos.x-p2.pos.x,2)+Math.pow(p1.pos.y-p2.pos.y,2)+Math.pow(p1.pos.z-p2.pos.z,2));
+            if (d < CONFIG.PROXIMITY_DISTANCE) cluster.push(p2);
         }
+
         if (cluster.length > 1) {
             await manageVoiceGroup(guild, cluster);
             cluster.forEach(p => handled.add(p.userId));
         } else {
             await moveToLobby(guild, p1);
+            handled.add(p1.userId);
         }
     }
 }
 
-function dist(p1, p2) { return Math.sqrt(Math.pow(p1.x-p2.x,2)+Math.pow(p1.y-p2.y,2)+Math.pow(p1.z-p2.z,2)); }
-
 async function manageVoiceGroup(guild, cluster) {
-    const memberIds = cluster.map(p => p.discordId);
-    const channelName = `🔊 | مجموعة ${cluster.length} لاعبين`;
-    let channel = guild.channels.cache.find(c => c.name === channelName && c.parentId === CONFIG.CATEGORY_ID);
+    const memberIds = cluster.map(p => p.discordId).sort().join('-');
+    let channelId = Object.keys(activeProximityChannels).find(id => activeProximityChannels[id] === memberIds);
 
-    if (!channel) {
-        channel = await guild.channels.create({
-            name: channelName,
+    if (!channelId) {
+        const channel = await guild.channels.create({
+            name: `🔊 | مجموعة ${cluster.length} لاعبين`,
             type: ChannelType.GuildVoice,
             parent: CONFIG.CATEGORY_ID,
             permissionOverwrites: [{ id: guild.id, deny: [PermissionsBitField.Flags.Connect] }]
         });
+        channelId = channel.id;
+        activeProximityChannels[channelId] = memberIds;
     }
 
     for (let p of cluster) {
         const member = await guild.members.fetch(p.discordId).catch(() => null);
         if (member && member.voice.channelId) {
             if (member.voice.serverMute) member.voice.setMute(false).catch(() => {});
-            if (member.voice.channelId !== channel.id) member.voice.setChannel(channel.id).catch(() => {});
+            if (member.voice.channelId !== channelId) member.voice.setChannel(channelId).catch(() => {});
         }
     }
 }
@@ -156,10 +142,27 @@ async function manageVoiceGroup(guild, cluster) {
 async function moveToLobby(guild, player) {
     const member = await guild.members.fetch(player.discordId).catch(() => null);
     if (member && member.voice.channelId && member.voice.channelId !== CONFIG.LOBBY_CHANNEL_ID) {
+        if (activeProximityChannels[member.voice.channelId]) {
+            member.voice.setMute(true).catch(() => {});
+            member.voice.setChannel(CONFIG.LOBBY_CHANNEL_ID).catch(() => {});
+        }
+    } else if (member && member.voice.channelId === CONFIG.LOBBY_CHANNEL_ID && !member.voice.serverMute) {
         member.voice.setMute(true).catch(() => {});
-        member.voice.setChannel(CONFIG.LOBBY_CHANNEL_ID).catch(() => {});
     }
 }
+
+// تنظيف القنوات الفارغة
+setInterval(async () => {
+    const guild = client.guilds.cache.get(CONFIG.GUILD_ID);
+    if (!guild) return;
+    for (const id in activeProximityChannels) {
+        const channel = guild.channels.cache.get(id);
+        if (!channel || channel.members.size === 0) {
+            if (channel) await channel.delete().catch(() => {});
+            delete activeProximityChannels[id];
+        }
+    }
+}, 5000);
 
 const PORT = process.env.PORT || 3000;
 client.login(CONFIG.TOKEN);
